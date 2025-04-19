@@ -27,6 +27,9 @@ class AlgoStrategy(gamelib.AlgoCore):
         self.sectors = []
         self.start_points = []
 
+        # turn number
+        self.last_turn = 0
+
         # LAST RESORT
         self.resort = False
 
@@ -69,13 +72,16 @@ class AlgoStrategy(gamelib.AlgoCore):
         gamelib.debug_write(f"Turn {state.turn_number}")
         state.suppress_warnings(True)
 
+        # Update turn number
+        self.last_turn = state.turn_number
+
         # ——— Last‑resort trigger: health <10 & >15 breaches on one wide edge ———
         # Define the “wide” edges
         left_edge  = {(0,13), (1,12), (2,11)}
         right_edge = {(27,13),(26,12),(25,11)}
         # Count breaches you’ve recorded in those zones
-        left_hits  = sum(1 for loc in self.scored_on if tuple(loc) in left_edge)
-        right_hits = sum(1 for loc in self.scored_on if tuple(loc) in right_edge)
+        left_hits  = sum(1 for b in self.scored_on if b["loc"] in left_edge)
+        right_hits = sum(1 for b in self.scored_on if b["loc"] in right_edge)
 
         if (not self.resort
             and (left_hits > 15 or right_hits > 15)):
@@ -85,10 +91,12 @@ class AlgoStrategy(gamelib.AlgoCore):
             self.resort = True
 
             # immediately run edge defense and finish turn
-            self._edge_defense_mode(state, side)
+            self._resort_defense_mode(state, side)
             state.submit_turn()
             return
-
+        
+        # rim defense
+        self._check_diagonal_edge_hits(state)
 
         # --- Offense ---
         if state.turn_number == 0:
@@ -115,19 +123,17 @@ class AlgoStrategy(gamelib.AlgoCore):
         state.submit_turn()
 
     def on_action_frame(self, turn_str):
-        """Stamp breaches with turn so we know where they happen."""
+        """Stamp breaches with turn so we know where+when they happen."""
         data = json.loads(turn_str)
-        t = getattr(self, "last_turn", None)
-        # record current turn for next on_turn
-        # we'll set last_turn in on_turn
         for breach in data.get("events", {}).get("breach", []):
-            loc, owner = breach[0], breach[4]
+            loc, owner = tuple(breach[0]), breach[4]
             if owner != 1:
-                self.scored_on.append(tuple(loc))
-                gamelib.debug_write(f"Opponent breached at {loc}")
-        # note: store turn for action_frame if needed
-        # finally update last_turn
-        # (we can rely on on_turn setting it too)
+                # record both location and the turn number
+                self.scored_on.append({
+                    "loc": loc,
+                    "turn": self.last_turn  # we'll set last_turn in on_turn
+                })
+                gamelib.debug_write(f"Opponent breached at {loc} on turn {self.last_turn}")
 
     # ------------------------
     # Initial defense
@@ -515,15 +521,15 @@ class AlgoStrategy(gamelib.AlgoCore):
     #     xs = [loc[0] for loc in self.scored_on]
     #     return 0 in xs and 27 in xs
 
-    def _edge_defense_mode(self, state: GameState, side: str):
+    def _resort_defense_mode(self, state: GameState, side: str):
         """
         Last‑resort edge defense.  Waits until enough MP to build
         the full interceptor+scout wave before doing anything.
         """
         # --- 0) Compute MP needed for full wave ---
         MP_current = state.get_resource(MP)
-        interceptor_cost = self.config["unitInformation"][INTERCEPTOR]["cost"]
-        scout_cost       = self.config["unitInformation"][SCOUT]["cost"]
+        _, interceptor_cost = state.type_cost(INTERCEPTOR)
+        _, scout_cost       = state.type_cost(SCOUT)
         required_MP = 5 * interceptor_cost + 20 * scout_cost
 
         # If we don't have enough MP yet, bail and wait
@@ -576,6 +582,57 @@ class AlgoStrategy(gamelib.AlgoCore):
         if MP_current > 0 and scouts_to_send > 0:
             last = scout_spots[-1]
             state.attempt_spawn(SCOUT, last, min(MP_current, scouts_to_send))
+    
+    # ------------------------
+    # Real time interoceptor
+    # ------------------------
+    def _check_diagonal_edge_hits(self, state: GameState):
+        """
+        Watch the two diagonal “rim” lines:
+        • left:  [(0,13),(1,12)…(13,0)]
+        • right: [(27,13),(26,12)…(14,0)]
+        Slide a window of 4 along each. If in each of the last 3 turns
+        there was ≥1 breach in that 4‑cell window, OR if this turn saw ≥5
+        breaches there, spawn 1 INTERCEPTOR at the window’s 2nd cell.
+        """
+        cur = state.turn_number
+
+        # build the two diagonals
+        left_diag  = [(i, 13 - i)       for i in range(14)]
+        right_diag = [(27 - i, 13 - i)  for i in range(14)]
+
+        for diag in (left_diag, right_diag):
+            # 11 windows of size 4
+            for i in range(len(diag) - 3):
+                window = diag[i : i + 4]
+
+                # 1) 3‑turn streak?
+                streak = all(
+                    any(b["turn"] == cur - dt and b["loc"] in window
+                        for b in self.scored_on)
+                    # for dt in (0, 1, 2)
+                    for dt in (1, 2, 3)
+                )
+                # 2) heavy damage this turn?
+                heavy = sum(
+                    1 for b in self.scored_on
+                    # if b["turn"] == cur and b["loc"] in window
+                    if b["turn"] == cur - 1 and b["loc"] in window
+                ) >= 5
+
+                if not (streak or heavy):
+                    continue
+
+                # 3) spawn one interceptor at the window’s “center” (index 1)
+                spawn = list(window[1])
+                if state.can_spawn(INTERCEPTOR, spawn):
+                    state.attempt_spawn(INTERCEPTOR, spawn, 1)
+                    gamelib.debug_write(
+                        f"{'STREAK' if streak else 'HEAVY'} breach on diagonal {window} "
+                        f"→ interceptor at {spawn}"
+                    )
+                # bail so we only fire one interceptor this turn
+                return
 
     # ------------------------
     # Utility sequences
