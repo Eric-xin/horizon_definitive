@@ -27,6 +27,9 @@ class AlgoStrategy(gamelib.AlgoCore):
         self.sectors = []
         self.start_points = []
 
+        # LAST RESORT
+        self.resort = False
+
     # ------------------------
     # Lifecycle hooks
     # ------------------------
@@ -66,6 +69,27 @@ class AlgoStrategy(gamelib.AlgoCore):
         gamelib.debug_write(f"Turn {state.turn_number}")
         state.suppress_warnings(True)
 
+        # ——— Last‑resort trigger: health <10 & >15 breaches on one wide edge ———
+        # Define the “wide” edges
+        left_edge  = {(0,13), (1,12), (2,11)}
+        right_edge = {(27,13),(26,12),(25,11)}
+        # Count breaches you’ve recorded in those zones
+        left_hits  = sum(1 for loc in self.scored_on if tuple(loc) in left_edge)
+        right_hits = sum(1 for loc in self.scored_on if tuple(loc) in right_edge)
+
+        if (not self.resort
+            and (left_hits > 15 or right_hits > 15)):
+            # enter last‑resort mode on the side with more hits
+            side = "left" if left_hits > right_hits else "right"
+            gamelib.debug_write(f"🚨 Entering LAST‑RESORT EDGE MODE ({side}) 🚨")
+            self.resort = True
+
+            # immediately run edge defense and finish turn
+            self._edge_defense_mode(state, side)
+            state.submit_turn()
+            return
+
+
         # --- Offense ---
         if state.turn_number == 0:
             self._initial_defense(state)
@@ -91,13 +115,19 @@ class AlgoStrategy(gamelib.AlgoCore):
         state.submit_turn()
 
     def on_action_frame(self, turn_str):
-        """Track where opponent scores to build reactive defense."""
+        """Stamp breaches with turn so we know where they happen."""
         data = json.loads(turn_str)
+        t = getattr(self, "last_turn", None)
+        # record current turn for next on_turn
+        # we'll set last_turn in on_turn
         for breach in data.get("events", {}).get("breach", []):
             loc, owner = breach[0], breach[4]
             if owner != 1:
-                gamelib.debug_write(f"Opponent scored at {loc}")
-                self.scored_on.append(loc)
+                self.scored_on.append(tuple(loc))
+                gamelib.debug_write(f"Opponent breached at {loc}")
+        # note: store turn for action_frame if needed
+        # finally update last_turn
+        # (we can rely on on_turn setting it too)
 
     # ------------------------
     # Initial defense
@@ -477,6 +507,75 @@ class AlgoStrategy(gamelib.AlgoCore):
             survived = 0
 
         return survived, dmg_to_scout, dmg_turret, dmg_wall, dmg_support, loc, attackers
+    
+    # ------------------------
+    # Edge defense [LAST RESORT] 
+    # ------------------------
+    # def _breaches_on_both_edges(self):
+    #     xs = [loc[0] for loc in self.scored_on]
+    #     return 0 in xs and 27 in xs
+
+    def _edge_defense_mode(self, state: GameState, side: str):
+        """
+        Last‑resort edge defense.  Waits until enough MP to build
+        the full interceptor+scout wave before doing anything.
+        """
+        # --- 0) Compute MP needed for full wave ---
+        MP_current = state.get_resource(MP)
+        interceptor_cost = self.config["unitInformation"][INTERCEPTOR]["cost"]
+        scout_cost       = self.config["unitInformation"][SCOUT]["cost"]
+        required_MP = 5 * interceptor_cost + 20 * scout_cost
+
+        # If we don't have enough MP yet, bail and wait
+        if MP_current < required_MP:
+            gamelib.debug_write(
+                f"Waiting for MP: have {MP_current}, need {required_MP}"
+            )
+            return
+
+        # --- 1) remove all existing walls/turrets ---
+        for x in range(28):
+            for y in range(28):
+                u = state.contains_stationary_unit([x, y])
+                if u and u.unit_type in (WALL, TURRET):
+                    state.attempt_remove([x, y])
+
+        # --- 2) build the diagonal support accelerator (or walls fallback) ---
+        if side == "right":
+            diag = [[13+i, i] for i in range(13)] + [[25,13]]
+            inter_pos   = [25,11]
+            scout_spots = [[20,6],[18,4],[16,2],[15,1]]
+        else:
+            diag = [[27-(13+i), i] for i in range(13)] + [[2,13]]
+            inter_pos   = [2,11]
+            scout_spots = [[7,6],[9,4],[11,2],[12,1]]
+
+        for loc in diag:
+            if state.can_spawn(SUPPORT, loc):
+                if state.attempt_spawn(SUPPORT, loc):
+                    state.attempt_upgrade(loc)
+            elif state.can_spawn(WALL, loc):
+                state.attempt_spawn(WALL, loc)
+
+        # --- 3) spawn exactly 5 INTERCEPTORS ---
+        state.attempt_spawn(INTERCEPTOR, inter_pos, 5)
+        MP_current -= 5 * interceptor_cost
+
+        # --- 4) spawn 20 SCOUTS in waves of 5 at each spot ---
+        scouts_to_send = 20
+        for spot in scout_spots:
+            if scouts_to_send <= 0:
+                break
+            num = min(5, scouts_to_send, MP_current)
+            if num > 0 and state.can_spawn(SCOUT, spot):
+                state.attempt_spawn(SCOUT, spot, num)
+                scouts_to_send -= num
+                MP_current    -= num
+
+        # --- 5) any leftover MP → dump the rest of scouts at the last spot ---
+        if MP_current > 0 and scouts_to_send > 0:
+            last = scout_spots[-1]
+            state.attempt_spawn(SCOUT, last, min(MP_current, scouts_to_send))
 
     # ------------------------
     # Utility sequences
