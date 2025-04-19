@@ -57,7 +57,8 @@ class AlgoStrategy(gamelib.AlgoCore):
                 self.sectors[group].append([c, r])
 
         # Four spawn points for scouts
-        self.start_points = [[4,12], [10,12], [17,12], [23,12]]
+        # self.start_points = [[4,12], [10,12], [17,12], [23,12]]
+        self.start_points = [[2,12], [5,12], [8,12], [11,12], [14,12], [17,12], [20,12], [23,12], [25,12]]
 
     def on_turn(self, turn_state):
         """Main turn entry: offense, defense, support."""
@@ -72,16 +73,20 @@ class AlgoStrategy(gamelib.AlgoCore):
             attack, loc, num = self.should_attack(state)
             if attack:
                 self.scout_attack(state, loc, num)
+        
+        # --- Far-side walls ---
+        self._build_far_side_walls(state)
 
         # --- Defense improvements ---
-        while state.get_resource(SP) >= 2 and self._try_improve_defense(state):
-            pass
+        max_improvements = 15
+        for _ in range(max_improvements):
+            if state.get_resource(SP) < 2:
+                break
+            if not self._try_improve_defense(state):
+                break
 
         # --- Support management ---
         self._manage_support(state, loc if 'loc' in locals() else None)
-
-        # --- Far-side walls ---
-        self._build_far_side_walls(state)
 
         state.submit_turn()
 
@@ -100,8 +105,10 @@ class AlgoStrategy(gamelib.AlgoCore):
     def _initial_defense(self, state: GameState):
         """Basic turret + wall setup on turn 0."""
         state.attempt_spawn(TURRET, self.start_points)
-        state.attempt_upgrade(self.start_points)
-        walls = [[4,13], [10,13], [17,13], [23,13]]
+        # state.attempt_upgrade(self.start_points) # No upgrade of turrets based on the current rule
+        # walls = [[4,13], [10,13], [17,13], [23,13]]
+        # walls = [[x, y + 1] for x, y in self.start_points]
+        walls = [[2,13], [5,13], [8,13], [11,13], [14,13], [17,13], [20,13], [23,13], [25,13]]
         state.attempt_spawn(WALL, walls)
 
     # ------------------------
@@ -140,12 +147,12 @@ class AlgoStrategy(gamelib.AlgoCore):
         for i, (w, _) in enumerate(defenses):
             """
             Weights:
-            - reinforced turrets: 6 (original 12)
-            - reinforced walls:   2 (original 5)
-            - turrets:            3 (original 6)
+            - reinforced turrets: 8 (original 12)
+            - reinforced walls:   3 (original 5)
+            - turrets:            6 (original 6)
             - walls:             1 (original 1)
             """
-            val = w[3]*14 + w[2]*6 + w[1]*3 + w[0]
+            val = w[3]*8 + w[2]*6 + w[1]*3 + w[0]
             if w[1] < 1:  # few upgraded walls → prioritize
                 val *= 0.5
             if val < best_v:
@@ -153,41 +160,134 @@ class AlgoStrategy(gamelib.AlgoCore):
         return best_i
 
     def improve_defense(self, state: GameState, sector: int, defense):
-        """Build/upgrade in a given sector; return True if action taken."""
-        sp = self.start_points[sector]
-        seq_up = self.upgrade_sequence(sp)
-        seq_tur = self.turret_sequence(sp)
+        """
+        1) Repair any wall under 25% on row 13.
+        2a) After turn ≥10, fill edges x=1–5 & 23–27 with a wall+turret pair.
+        2b) Symmetric expansion from sides toward centre, placing a wall on row 13
+            and a turret behind it on row 12, leaving at most one adjacent wall.
+        3) Upgrade all walls after turn ≥7.
+        4) Build only the 2nd turret row (y=start_row–2), where a wall sits at y+1.
+        5) Seal gaps on row 13 except at x=14 once turn ≥15.
+        6) Funnel layers from turn ≥20.
+        """
+        turn = state.turn_number
+        start = self.start_points[sector]
+        centre = 14
 
-        # 1) Ensure at least one upgraded turret
-        if defense[0][3] < 1 and state.get_resource(MP) >= 8:
-            return self.try_build_upgraded_turret(state, seq_tur)
+        # Precompute row 13 cells & existing walls
+        row13 = [[x, 13] for x in range(28)]
+        existing = {
+            tuple(loc)
+            for loc in row13
+            if (u := state.contains_stationary_unit(loc)) and u.unit_type == WALL
+        }
 
-        # 2) Upgrade existing structures
-        for loc in seq_up:
-            if self.try_upgrade(state, loc):
+        # 1a) Repair weak walls
+        for loc in row13:
+            unit = state.contains_stationary_unit(loc)
+            if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
+                state.attempt_remove(loc)
+                if state.can_spawn(WALL, loc):
+                    state.attempt_spawn(WALL, loc)
+                    state.attempt_upgrade(loc)
+                return True
+        
+        # 1b) Fix initial walls and turrets, install if destroyed
+        for loc in self.start_points:
+            # turret sits at the start point
+            turret_loc = loc
+            # wall directly in front of it
+            wall_loc   = [loc[0], loc[1] + 1]
+
+            # rebuild missing wall first
+            if not state.contains_stationary_unit(wall_loc) and state.can_spawn(WALL, wall_loc):
+                state.attempt_spawn(WALL, wall_loc)
+                state.attempt_upgrade(wall_loc)
                 return True
 
-        # 3) Build new walls/turrets based on counts
-        num_walls = defense[1][0] + defense[1][1]
-        num_turrets = defense[1][2] + defense[1][3]
-
-        # Build walls if few exist
-        if num_walls < 1:
-            if state.get_resource(MP) >= 4:
-                return self._spawn_and_upgrade_wall(state, seq_up)
-            if state.get_resource(MP) >= 2:
-                return self._spawn_wall(state, seq_up)
-
-        # Extra turret if resources allow
-        if state.get_resource(MP) >= 8:
-            if self.try_build_upgraded_turret(state, seq_tur):
+            # then rebuild missing turret
+            if not state.contains_stationary_unit(turret_loc) and state.can_spawn(TURRET, turret_loc):
+                state.attempt_spawn(TURRET, turret_loc)
                 return True
 
-        # Balance walls/turrets
-        if num_walls < num_turrets and state.get_resource(MP) >= 2:
-            return self._spawn_wall(state, seq_up)
+        # 2) Ensure wall+turret sets at designated locations, symmetric side→centre
+        # key_positions = [[4,13],[6,13],[8,13],[12,13],[14,13],[16,13],[19,13],[22,13],[24,13]]
+        # # build symmetric order: (4,24),(6,22),(8,19),(12,16),(14)
+        # ordered = []
+        # n = len(key_positions)
+        # for i in range(n // 2):
+        #     ordered.append(key_positions[i])
+        #     ordered.append(key_positions[-i-1])
+        # if n % 2 == 1:
+        #     ordered.append(key_positions[n // 2])
+        key_positions = [[4,13], [24,13], [6,13], [22,13], [8,13], [19,13], [12,13], [16,13], [14,13]]
 
-        return False  # nothing done
+        for wloc in key_positions:
+            tloc = [wloc[0], 12]
+            wall_unit   = state.contains_stationary_unit(wloc)
+            turret_unit = state.contains_stationary_unit(tloc)
+
+            # 1) Spawn missing wall, then upgrade it
+            if not wall_unit and state.can_spawn(WALL, wloc):
+                if state.attempt_spawn(WALL, wloc):
+                    state.attempt_upgrade(wloc)
+                return True
+
+            # 2) Upgrade any unupgraded wall
+            if wall_unit and wall_unit.unit_type == WALL and not wall_unit.upgraded:
+                state.attempt_upgrade(wloc)
+                return True
+
+            # 3) Then spawn missing turret
+            if not turret_unit and wall_unit and state.can_spawn(TURRET, tloc):
+                state.attempt_spawn(TURRET, tloc)
+                return True
+
+        # 3) Build only the 2nd turret row
+        mp = state.get_resource(MP)
+        if mp >= 3:
+            tur_cells = self.turret_sequence(start)
+            start_row = start[1]
+            y2 = start_row - 2
+            for loc in tur_cells:
+                if loc[1] != y2:
+                    continue
+                if (state.contains_stationary_unit([loc[0], y2 + 1])
+                    and state.can_spawn(TURRET, loc)):
+                    state.attempt_spawn(TURRET, loc)
+                    return True
+
+        # 4) Seal gaps on row 13 except at centre
+        if turn >= 15:
+            hole = [centre, 13]
+            if state.contains_stationary_unit(hole):
+                state.attempt_remove(hole)
+                return True
+            for loc in row13:
+                if loc[0] == centre:
+                    continue
+                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
+                    state.attempt_spawn(WALL, loc)
+                    return True
+
+        # 5) Funnel layers from turn 20 onward
+        if turn >= 20:
+            layer = min(turn - 20, 2)
+            start_row = start[1]
+            wall_y   = start_row - 1 - layer
+            turret_y = start_row - 2 - layer
+            for dx in (-1, 1):
+                wpos = [centre + dx * (1 + layer), wall_y]
+                if state.can_spawn(WALL, wpos):
+                    state.attempt_spawn(WALL, wpos)
+                    return True
+            for dx in (-1, 1):
+                tpos = [centre + dx * (2 + layer), turret_y]
+                if state.can_spawn(TURRET, tpos):
+                    state.attempt_spawn(TURRET, tpos)
+                    return True
+
+        return False
 
     def try_build_upgraded_turret(self, state: GameState, seq):
         if state.get_resource(MP) < 8:
@@ -227,9 +327,9 @@ class AlgoStrategy(gamelib.AlgoCore):
     # Support management
     # ------------------------
     def _manage_support(self, state: GameState, scout_loc):
-        """Every 8 turns starting turn 3, prune & place shields around scouts."""
+        """Every 5 turns starting turn 3, prune & place shields around scouts."""
         t = state.turn_number
-        if scout_loc and t >= 3 and (t - 3) % 8 == 0:
+        if scout_loc and t >= 5:
             path = state.find_path_to_edge(scout_loc)
             rng = self.config["unitInformation"][1]["shieldRange"]
             # prune
@@ -255,7 +355,7 @@ class AlgoStrategy(gamelib.AlgoCore):
     # Far-side walls
     # ------------------------
     def _build_far_side_walls(self, state: GameState):
-        spots = [[0,13], [1,13], [26,13], [27,13]]
+        spots = [[0,13], [1,13], [2,13], [25,13], [26,13], [27,13]]
         for loc in spots:
             if state.can_spawn(WALL, loc):
                 state.attempt_spawn(WALL, loc)
