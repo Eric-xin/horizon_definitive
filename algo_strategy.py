@@ -32,6 +32,7 @@ class AlgoStrategy(gamelib.AlgoCore):
 
         # LAST RESORT
         self.resort = False
+        self.resort_remove = False
 
     # ------------------------
     # Lifecycle hooks
@@ -530,7 +531,7 @@ class AlgoStrategy(gamelib.AlgoCore):
         MP_current = state.get_resource(MP)
         _, interceptor_cost = state.type_cost(INTERCEPTOR)
         _, scout_cost       = state.type_cost(SCOUT)
-        required_MP = 5 * interceptor_cost + 20 * scout_cost
+        required_MP = 2 * interceptor_cost + 15 * scout_cost
 
         # If we don't have enough MP yet, bail and wait
         if MP_current < required_MP:
@@ -540,19 +541,22 @@ class AlgoStrategy(gamelib.AlgoCore):
             return
 
         # --- 1) remove all existing walls/turrets ---
-        for x in range(28):
-            for y in range(28):
-                u = state.contains_stationary_unit([x, y])
-                if u and u.unit_type in (WALL, TURRET):
-                    state.attempt_remove([x, y])
+        if not self.resort_remove:
+            self.resort_remove = True
+            for x in range(28):
+                for y in range(28):
+                    u = state.contains_stationary_unit([x, y])
+                    if u and u.unit_type in (WALL, TURRET):
+                        state.attempt_remove([x, y])
+            return
 
         # --- 2) build the diagonal support accelerator (or walls fallback) ---
         if side == "right":
-            diag = [[13+i, i] for i in range(13)] + [[25,13]]
+            diag = [[13+i, (i+1)] for i in range(13)]
             inter_pos   = [25,11]
             scout_spots = [[20,6],[18,4],[16,2],[15,1]]
         else:
-            diag = [[27-(13+i), i] for i in range(13)] + [[2,13]]
+            diag = [[27-(13+i), (i+1)] for i in range(13)]
             inter_pos   = [2,11]
             scout_spots = [[7,6],[9,4],[11,2],[12,1]]
 
@@ -564,15 +568,15 @@ class AlgoStrategy(gamelib.AlgoCore):
                 state.attempt_spawn(WALL, loc)
 
         # --- 3) spawn exactly 5 INTERCEPTORS ---
-        state.attempt_spawn(INTERCEPTOR, inter_pos, 5)
-        MP_current -= 5 * interceptor_cost
+        state.attempt_spawn(INTERCEPTOR, inter_pos, 2)
+        MP_current -= 2 * interceptor_cost
 
-        # --- 4) spawn 20 SCOUTS in waves of 5 at each spot ---
-        scouts_to_send = 20
+        # --- 4) spawn 15 SCOUTS in waves of 5 at each spot ---
+        scouts_to_send = 15
         for spot in scout_spots:
             if scouts_to_send <= 0:
                 break
-            num = min(5, scouts_to_send, MP_current)
+            num = min(3, scouts_to_send, MP_current)
             if num > 0 and state.can_spawn(SCOUT, spot):
                 state.attempt_spawn(SCOUT, spot, num)
                 scouts_to_send -= num
