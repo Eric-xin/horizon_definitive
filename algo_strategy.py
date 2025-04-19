@@ -30,9 +30,15 @@ class AlgoStrategy(gamelib.AlgoCore):
         # turn number
         self.last_turn = 0
 
-        # LAST RESORT
+        # RESORT SECOND
         self.resort = False
-        self.resort_remove = False
+
+        # rim
+        self.left_rim = []
+        self.rit_rim = []
+
+        # walls for RESORT SECOND
+        self.wallresnd = []
 
     # ------------------------
     # Lifecycle hooks
@@ -64,8 +70,15 @@ class AlgoStrategy(gamelib.AlgoCore):
                 self.sectors[group].append([c, r])
 
         # Four spawn points for scouts
-        # self.start_points = [[4,12], [10,12], [17,12], [23,12]]
-        self.start_points = [[2,12], [5,12], [8,12], [11,12], [14,12], [17,12], [20,12], [23,12], [25,12]]
+        # self.start_points = [[3,12], [6,10], [9,10], [12,10], [15,10], [18,10], [21,10], [24,12]]
+        self.start_points = [[3,12], [4,12], [5,11], [6,10], [9,10], [12,10], [15,10], [18,10], [21,10], [23,11], [24,12]]
+
+        # rim
+        self.left_rim = [[13 + i, i + 1] for i in range(13)] + [[25, 14]]
+        self.rit_rim = [[27 - (13 + i), i + 1] for i in range(13)] + [[2, 14]]
+
+        # walls for RESORT SECOND
+        self.wallresnd = [[3,13], [4,13], [5,12], [6,11], [7,11], [8,11], [9,11], [10,11], [11,11], [12,11], [13,11], [14,11], [15,11], [16,11], [17,11], [18,11], [19,11], [20,11], [21,11], [22,11], [23,12], [24,13]]
 
     def on_turn(self, turn_state):
         """Main turn entry: offense, defense, support."""
@@ -76,39 +89,43 @@ class AlgoStrategy(gamelib.AlgoCore):
         # Update turn number
         self.last_turn = state.turn_number
 
-        # ——— Last‑resort trigger: health <10 & >15 breaches on one wide edge ———
-        # Define the “wide” edges
-        left_edge  = {(0,13), (1,12), (2,11)}
-        right_edge = {(27,13),(26,12),(25,11)}
-        # Count breaches you’ve recorded in those zones
-        left_hits  = sum(1 for b in self.scored_on if b["loc"] in left_edge)
-        right_hits = sum(1 for b in self.scored_on if b["loc"] in right_edge)
-
-        if (not self.resort
-            and (left_hits > 15 or right_hits > 15)):
-            # enter last‑resort mode on the side with more hits
-            side = "left" if left_hits > right_hits else "right"
-            gamelib.debug_write(f"🚨 Entering LAST‑RESORT EDGE MODE ({side}) 🚨")
+        # --- Check for last resort ---
+        if state.turn_number >= 6:
             self.resort = True
-
-            # immediately run edge defense and finish turn
-            self._resort_defense_mode(state, side)
-            state.submit_turn()
-            return
-        
-        # rim defense
-        self._check_diagonal_edge_hits(state)
 
         # --- Offense ---
         if state.turn_number == 0:
             self._initial_defense(state)
-        else:
+        elif not self.resort:
             attack, loc, num = self.should_attack(state)
             if attack:
                 self.scout_attack(state, loc, num)
         
-        # --- Far-side walls ---
-        self._build_far_side_walls(state)
+        # --- Far-side walls | RESORT SECOND ---
+        if self.resort:
+            # 1) Compute MP threshold for 3 interceptors + 7 scouts
+            _, int_cost   = state.type_cost(INTERCEPTOR)  # returns [sp, mp]
+            _, scout_cost = state.type_cost(SCOUT)
+            threshold = 3 * int_cost + 7 * scout_cost
+            mp = state.get_resource(MP)
+
+            # 2) If we can afford the wave, open up the left gap
+            if mp >= threshold:
+                # remove walls at [0,13],[1,13] and build everywhere else
+                self._build_far_side_walls(state, exclude_side='l')
+            else:
+                # otherwise, keep full ring
+                self._build_far_side_walls(state)
+
+            # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
+            if (mp >= threshold
+                and not state.contains_stationary_unit([0,13])
+                and not state.contains_stationary_unit([1,13])):
+                self._manage_support(state, [14, 0]) # place supporter
+                self.resort_offense(state)
+        else:
+            # Normal far‑side walls when not in last resort
+            self._build_far_side_walls(state)
 
         # --- Defense improvements ---
         max_improvements = 15
@@ -143,10 +160,13 @@ class AlgoStrategy(gamelib.AlgoCore):
         """Basic turret + wall setup on turn 0."""
         state.attempt_spawn(TURRET, self.start_points)
         # state.attempt_upgrade(self.start_points) # No upgrade of turrets based on the current rule
-        # walls = [[4,13], [10,13], [17,13], [23,13]]
-        # walls = [[x, y + 1] for x, y in self.start_points]
-        walls = [[2,13], [5,13], [8,13], [11,13], [14,13], [17,13], [20,13], [23,13], [25,13]]
+        walls = [[x, y + 1] for x, y in self.start_points]
         state.attempt_spawn(WALL, walls)
+        # try to upgrade walls
+        for loc in walls:
+            unit = state.contains_stationary_unit(loc)
+            if unit and unit.unit_type == WALL and not unit.upgraded:
+                state.attempt_upgrade(loc)
 
     # ------------------------
     # Defense improvement
@@ -196,45 +216,55 @@ class AlgoStrategy(gamelib.AlgoCore):
                 best_v, best_i = val, i
         return best_i
 
-    def improve_defense(self, state: GameState, sector: int, defense):
+    def improve_defense(self, state: GameState, sector: int, defense) -> bool:
         """
-        1) Repair any wall under 25% on row 13.
-        2a) After turn ≥10, fill edges x=1–5 & 23–27 with a wall+turret pair.
-        2b) Symmetric expansion from sides toward centre, placing a wall on row 13
-            and a turret behind it on row 12, leaving at most one adjacent wall.
-        3) Upgrade all walls after turn ≥7.
-        4) Build only the 2nd turret row (y=start_row–2), where a wall sits at y+1.
-        5) Seal gaps on row 13 except at x=14 once turn ≥15.
-        6) Funnel layers from turn ≥20.
+        Improve defenses in one sector or, if in last‑resort mode, rebuild a special wall ring.
+        
+        Parameters:
+        state   – current GameState
+        sector  – index 0–3 of your four triangular sectors
+        defense – output of parse_defenses(state)[sector] (unused here)
+        
+        Returns:
+        True if an action (spawn/upgrade/remove) was performed this turn.
         """
-        turn = state.turn_number
-        start = self.start_points[sector]
+        turn   = state.turn_number
+        start  = self.start_points[sector]
         centre = 14
 
-        # Precompute row 13 cells & existing walls
-        row13 = [[x, 13] for x in range(28)]
-        existing = {
-            tuple(loc)
-            for loc in row13
-            if (u := state.contains_stationary_unit(loc)) and u.unit_type == WALL
-        }
-
-        # 1a) Repair weak walls
-        for loc in row13:
-            unit = state.contains_stationary_unit(loc)
-            if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
-                state.attempt_remove(loc)
-                if state.can_spawn(WALL, loc):
+        # —————————————————————————————————————————————————————————————
+        # 1) LAST‑RESORT MODE: rebuild your special wall ring (self.wallresnd)
+        # —————————————————————————————————————————————————————————————
+        if self.resort:
+            # find all current walls in wallresnd
+            existing = {
+                tuple(loc)
+                for loc in self.wallresnd
+                if (u := state.contains_stationary_unit(loc)) 
+                and u.unit_type == WALL
+            }
+            for loc in self.wallresnd:
+                unit = state.contains_stationary_unit(loc)
+                # if damaged below 25%, scrap + rebuild
+                if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
+                    state.attempt_remove(loc)
+                    if state.can_spawn(WALL, loc):
+                        state.attempt_spawn(WALL, loc)
+                        state.attempt_upgrade(loc)
+                    return True
+                # if missing, spawn + upgrade
+                if tuple(loc) not in existing and state.can_spawn(WALL, loc):
                     state.attempt_spawn(WALL, loc)
                     state.attempt_upgrade(loc)
-                return True
-        
-        # 1b) Fix initial walls and turrets, install if destroyed
-        for loc in self.start_points:
-            # turret sits at the start point
-            turret_loc = loc
-            # wall directly in front of it
-            wall_loc   = [loc[0], loc[1] + 1]
+                    return True
+            return False
+
+        # —————————————————————————————————————————————————————————————
+        # 2) INITIAL LINE: fix any broken wall+turret at start_points
+        # —————————————————————————————————————————————————————————————
+        for pt in self.start_points:
+            wall_loc   = [pt[0], pt[1] + 1]
+            turret_loc = pt
 
             # rebuild missing wall first
             if not state.contains_stationary_unit(wall_loc) and state.can_spawn(WALL, wall_loc):
@@ -247,83 +277,37 @@ class AlgoStrategy(gamelib.AlgoCore):
                 state.attempt_spawn(TURRET, turret_loc)
                 return True
 
-        # 2) Ensure wall+turret sets at designated locations, symmetric side→centre
-        # key_positions = [[4,13],[6,13],[8,13],[12,13],[14,13],[16,13],[19,13],[22,13],[24,13]]
-        # # build symmetric order: (4,24),(6,22),(8,19),(12,16),(14)
-        # ordered = []
-        # n = len(key_positions)
-        # for i in range(n // 2):
-        #     ordered.append(key_positions[i])
-        #     ordered.append(key_positions[-i-1])
-        # if n % 2 == 1:
-        #     ordered.append(key_positions[n // 2])
-        key_positions = [[4,13], [24,13], [6,13], [22,13], [8,13], [19,13], [12,13], [16,13], [14,13]]
+        # —————————————————————————————————————————————————————————————
+        # 3) SYMMETRIC MID‑DEFENSE: walls at y=11, turrets at y=10
+        #    Ranges: x=7…11 (left) and x=22…18 (right), interleaved
+        # —————————————————————————————————————————————————————————————
+        left_range  = range(7, 12)       #  7,8,9,10,11
+        right_range = range(22, 17, -1)  # 22,21,20,19,18
 
-        for wloc in key_positions:
-            tloc = [wloc[0], 12]
-            wall_unit   = state.contains_stationary_unit(wloc)
-            turret_unit = state.contains_stationary_unit(tloc)
+        for lx, rx in zip(left_range, right_range):
+            for x in (lx, rx):
+                wloc = [x, 11]
+                tloc = [x, 10]
+                wall_unit   = state.contains_stationary_unit(wloc)
+                turret_unit = state.contains_stationary_unit(tloc)
 
-            # 1) Spawn missing wall, then upgrade it
-            if not wall_unit and state.can_spawn(WALL, wloc):
-                if state.attempt_spawn(WALL, wloc):
+                # 3.1) spawn/upgrade missing wall
+                if not wall_unit and state.can_spawn(WALL, wloc):
+                    state.attempt_spawn(WALL, wloc)
                     state.attempt_upgrade(wloc)
-                return True
-
-            # 2) Upgrade any unupgraded wall
-            if wall_unit and wall_unit.unit_type == WALL and not wall_unit.upgraded:
-                state.attempt_upgrade(wloc)
-                return True
-
-            # 3) Then spawn missing turret
-            if not turret_unit and wall_unit and state.can_spawn(TURRET, tloc):
-                state.attempt_spawn(TURRET, tloc)
-                return True
-
-        # 3) Build only the 2nd turret row
-        mp = state.get_resource(MP)
-        if mp >= 3:
-            tur_cells = self.turret_sequence(start)
-            start_row = start[1]
-            y2 = start_row - 2
-            for loc in tur_cells:
-                if loc[1] != y2:
-                    continue
-                if (state.contains_stationary_unit([loc[0], y2 + 1])
-                    and state.can_spawn(TURRET, loc)):
-                    state.attempt_spawn(TURRET, loc)
                     return True
 
-        # 4) Seal gaps on row 13 except at centre
-        if turn >= 15:
-            hole = [centre, 13]
-            if state.contains_stationary_unit(hole):
-                state.attempt_remove(hole)
-                return True
-            for loc in row13:
-                if loc[0] == centre:
-                    continue
-                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
-                    state.attempt_spawn(WALL, loc)
+                # 3.2) upgrade damaged/unupgraded wall
+                if wall_unit and wall_unit.unit_type == WALL and not wall_unit.upgraded:
+                    state.attempt_upgrade(wloc)
                     return True
 
-        # 5) Funnel layers from turn 20 onward
-        if turn >= 20:
-            layer = min(turn - 20, 2)
-            start_row = start[1]
-            wall_y   = start_row - 1 - layer
-            turret_y = start_row - 2 - layer
-            for dx in (-1, 1):
-                wpos = [centre + dx * (1 + layer), wall_y]
-                if state.can_spawn(WALL, wpos):
-                    state.attempt_spawn(WALL, wpos)
-                    return True
-            for dx in (-1, 1):
-                tpos = [centre + dx * (2 + layer), turret_y]
-                if state.can_spawn(TURRET, tpos):
-                    state.attempt_spawn(TURRET, tpos)
+                # 3.3) spawn missing turret behind
+                if not turret_unit and wall_unit and state.can_spawn(TURRET, tloc):
+                    state.attempt_spawn(TURRET, tloc)
                     return True
 
+        # nothing to do
         return False
 
     def try_build_upgraded_turret(self, state: GameState, seq):
@@ -364,35 +348,82 @@ class AlgoStrategy(gamelib.AlgoCore):
     # Support management
     # ------------------------
     def _manage_support(self, state: GameState, scout_loc):
-        """Every 5 turns starting turn 3, prune & place shields around scouts."""
         t = state.turn_number
+        # 1) build only the inward‑from‑diagonal band
+        desired = {
+            (x+2, y) for x, y in self.left_rim
+        } | {
+            (x-2, y) for x, y in self.rit_rim
+        }
+
         if scout_loc and t >= 5:
             path = state.find_path_to_edge(scout_loc)
-            rng = self.config["unitInformation"][1]["shieldRange"]
-            # prune
+            rng  = self.config["unitInformation"][1]["shieldRange"]
+
+            # prune anything outside desired or out of range
             kept = []
             for loc in self.support_locations:
-                unit = state.contains_stationary_unit(loc)
-                if unit and any(self.manhattan(loc, p) <= rng for p in path):
+                if ( tuple(loc) in desired
+                    and any(self.manhattan(loc, p) <= rng for p in path)
+                ):
                     kept.append(loc)
                 else:
                     state.attempt_remove(loc)
             self.support_locations = kept
-            # place new
+
+            # place new only where desired ∩ path‑range
             for loc in state.game_map.get_locations_in_range(scout_loc, rng):
-                if loc not in kept and loc not in path and state.can_spawn(SUPPORT, loc):
-                    if state.attempt_spawn(SUPPORT, loc):
-                        self.support_locations.append(loc)
-                        state.attempt_upgrade(loc)
-        # upgrade all shields
+                pt = tuple(loc)
+                if ( pt in desired
+                    and pt not in path
+                    and pt not in kept
+                    and state.can_spawn(SUPPORT, loc)
+                ):
+                    state.attempt_spawn(SUPPORT, loc)
+                    state.attempt_upgrade(loc)
+                    self.support_locations.append(loc)
+
+        # upgrade all valid shields
         for loc in list(self.support_locations):
             state.attempt_upgrade(loc)
 
     # ------------------------
     # Far-side walls
     # ------------------------
-    def _build_far_side_walls(self, state: GameState):
+    def _build_far_side_walls(
+        self,
+        state: GameState,
+        exclude_side: str = None
+    ) -> None:
+        """
+        Maintain walls along the far edges, optionally leaving an opening.
+
+        Parameters:
+        state         – current GameState
+        exclude_side  – 'l' to open left ([0,13],[1,13]),
+                        'r' to open right ([26,13],[27,13]),
+                        or None to build everywhere.
+        """
+        # Define all candidate spots
         spots = [[0,13], [1,13], [2,13], [25,13], [26,13], [27,13]]
+        # Define which two to permanently open/unbuild
+        left_open  = [[0,13], [1,13]]
+        right_open = [[26,13], [27,13]]
+
+        # 1) If asked to open one side, remove any existing walls there
+        if exclude_side == 'l':
+            for loc in left_open:
+                if state.contains_stationary_unit(loc):
+                    state.attempt_remove(loc)
+            # exclude from build list
+            spots = [loc for loc in spots if loc not in left_open]
+        elif exclude_side == 'r':
+            for loc in right_open:
+                if state.contains_stationary_unit(loc):
+                    state.attempt_remove(loc)
+            spots = [loc for loc in spots if loc not in right_open]
+
+        # 2) Build and upgrade walls at the remaining spots
         for loc in spots:
             if state.can_spawn(WALL, loc):
                 state.attempt_spawn(WALL, loc)
@@ -403,6 +434,36 @@ class AlgoStrategy(gamelib.AlgoCore):
     # ------------------------
     # Offense logic
     # ------------------------
+    def resort_offense(self, state: GameState) -> None:
+        """
+        Last‑resort offense: spawn up to 3 INTERCEPTORs at [3,10],
+        then deploy as many SCOUTs as possible at [14,0] with remaining MP.
+        """
+        # 1) Get available MP
+        mp_available = state.get_resource(MP)
+
+        # 2) Determine MP costs (cast to int)
+        _, mp_cost_int   = state.type_cost(INTERCEPTOR)
+        _, mp_cost_scout = state.type_cost(SCOUT)
+        mp_cost_int   = int(mp_cost_int)
+        mp_cost_scout = int(mp_cost_scout)
+
+        # 3) Spawn up to 3 interceptors at [3,10]
+        max_int = mp_available // mp_cost_int
+        num_int = min(3, max_int)
+        num_int = int(num_int)  # ensure it's an integer
+        if num_int > 0 and state.can_spawn(INTERCEPTOR, [3, 10]):
+            state.attempt_spawn(INTERCEPTOR, [3, 10], num_int)
+            mp_available -= num_int * mp_cost_int
+            gamelib.debug_write(f"Resort offense: spawned {num_int} INTERCEPTOR(s) at [3,10]")
+
+        # 4) Spend all remaining MP on scouts at [14,0]
+        num_scout = mp_available // mp_cost_scout
+        num_scout = int(num_scout)
+        if num_scout > 0 and state.can_spawn(SCOUT, [14, 0]):
+            state.attempt_spawn(SCOUT, [14, 0], num_scout)
+            gamelib.debug_write(f"Resort offense: spawned {num_scout} SCOUT(s) at [14,0]")
+
     def should_attack(self, state: GameState):
         mp = state.get_resource(MP)
         scouts = int(mp)
@@ -425,7 +486,7 @@ class AlgoStrategy(gamelib.AlgoCore):
         Simulate num_scouts scouts from all deploy points, return best (loc, survived).
         """
         options = []
-        for i in range(14):
+        for i in range(13): # change from 14
             for pt in ([i,13-i], [14+i,i]):
                 if orig_state.can_spawn(SCOUT, pt):
                     options.append(pt)
@@ -514,129 +575,6 @@ class AlgoStrategy(gamelib.AlgoCore):
             survived = 0
 
         return survived, dmg_to_scout, dmg_turret, dmg_wall, dmg_support, loc, attackers
-    
-    # ------------------------
-    # Edge defense [LAST RESORT] 
-    # ------------------------
-    # def _breaches_on_both_edges(self):
-    #     xs = [loc[0] for loc in self.scored_on]
-    #     return 0 in xs and 27 in xs
-
-    def _resort_defense_mode(self, state: GameState, side: str):
-        """
-        Last‑resort edge defense.  Waits until enough MP to build
-        the full interceptor+scout wave before doing anything.
-        """
-        # --- 0) Compute MP needed for full wave ---
-        MP_current = state.get_resource(MP)
-        _, interceptor_cost = state.type_cost(INTERCEPTOR)
-        _, scout_cost       = state.type_cost(SCOUT)
-        required_MP = 2 * interceptor_cost + 15 * scout_cost
-
-        # If we don't have enough MP yet, bail and wait
-        if MP_current < required_MP:
-            gamelib.debug_write(
-                f"Waiting for MP: have {MP_current}, need {required_MP}"
-            )
-            return
-
-        # --- 1) remove all existing walls/turrets ---
-        if not self.resort_remove:
-            self.resort_remove = True
-            for x in range(28):
-                for y in range(28):
-                    u = state.contains_stationary_unit([x, y])
-                    if u and u.unit_type in (WALL, TURRET):
-                        state.attempt_remove([x, y])
-            return
-
-        # --- 2) build the diagonal support accelerator (or walls fallback) ---
-        if side == "right":
-            diag = [[13+i, (i+1)] for i in range(13)]
-            inter_pos   = [25,11]
-            scout_spots = [[20,6],[18,4],[16,2],[15,1]]
-        else:
-            diag = [[27-(13+i), (i+1)] for i in range(13)]
-            inter_pos   = [2,11]
-            scout_spots = [[7,6],[9,4],[11,2],[12,1]]
-
-        for loc in diag:
-            if state.can_spawn(SUPPORT, loc):
-                if state.attempt_spawn(SUPPORT, loc):
-                    state.attempt_upgrade(loc)
-            elif state.can_spawn(WALL, loc):
-                state.attempt_spawn(WALL, loc)
-
-        # --- 3) spawn exactly 5 INTERCEPTORS ---
-        state.attempt_spawn(INTERCEPTOR, inter_pos, 2)
-        MP_current -= 2 * interceptor_cost
-
-        # --- 4) spawn 15 SCOUTS in waves of 5 at each spot ---
-        scouts_to_send = 15
-        for spot in scout_spots:
-            if scouts_to_send <= 0:
-                break
-            num = min(3, scouts_to_send, MP_current)
-            if num > 0 and state.can_spawn(SCOUT, spot):
-                state.attempt_spawn(SCOUT, spot, num)
-                scouts_to_send -= num
-                MP_current    -= num
-
-        # --- 5) any leftover MP → dump the rest of scouts at the last spot ---
-        if MP_current > 0 and scouts_to_send > 0:
-            last = scout_spots[-1]
-            state.attempt_spawn(SCOUT, last, min(MP_current, scouts_to_send))
-    
-    # ------------------------
-    # Real time interoceptor
-    # ------------------------
-    def _check_diagonal_edge_hits(self, state: GameState):
-        """
-        Watch the two diagonal “rim” lines:
-        • left:  [(0,13),(1,12)…(13,0)]
-        • right: [(27,13),(26,12)…(14,0)]
-        Slide a window of 4 along each. If in each of the last 3 turns
-        there was ≥1 breach in that 4‑cell window, OR if this turn saw ≥5
-        breaches there, spawn 1 INTERCEPTOR at the window’s 2nd cell.
-        """
-        cur = state.turn_number
-
-        # build the two diagonals
-        left_diag  = [(i, 13 - i)       for i in range(14)]
-        right_diag = [(27 - i, 13 - i)  for i in range(14)]
-
-        for diag in (left_diag, right_diag):
-            # 11 windows of size 4
-            for i in range(len(diag) - 3):
-                window = diag[i : i + 4]
-
-                # 1) 3‑turn streak?
-                streak = all(
-                    any(b["turn"] == cur - dt and b["loc"] in window
-                        for b in self.scored_on)
-                    # for dt in (0, 1, 2)
-                    for dt in (1, 2, 3)
-                )
-                # 2) heavy damage this turn?
-                heavy = sum(
-                    1 for b in self.scored_on
-                    # if b["turn"] == cur and b["loc"] in window
-                    if b["turn"] == cur - 1 and b["loc"] in window
-                ) >= 5
-
-                if not (streak or heavy):
-                    continue
-
-                # 3) spawn one interceptor at the window’s “center” (index 1)
-                spawn = list(window[1])
-                if state.can_spawn(INTERCEPTOR, spawn):
-                    state.attempt_spawn(INTERCEPTOR, spawn, 1)
-                    gamelib.debug_write(
-                        f"{'STREAK' if streak else 'HEAVY'} breach on diagonal {window} "
-                        f"→ interceptor at {spawn}"
-                    )
-                # bail so we only fire one interceptor this turn
-                return
 
     # ------------------------
     # Utility sequences
