@@ -39,6 +39,7 @@ class AlgoStrategy(gamelib.AlgoCore):
 
         # walls for RESORT SECOND
         self.wallresnd = []
+        self.wallresnd_bp = []
 
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = []
@@ -83,6 +84,8 @@ class AlgoStrategy(gamelib.AlgoCore):
         # walls for RESORT SECOND
         self.wallresnd = [[3,13], [4,13], [5,12], [6,11], [7,11], [8,11], [9,11], [10,11], [11,11], [12,11], [13,11], [14,11], [15,11], [16,11], [17,11], [18,11], [19,11], [20,11], [21,11], [22,11], [23,12], [24,13]]
 
+        self.wallresnd_bp = [[26,12], [25,12], [25,11], [24,11], [24,10], [23,10], [23,9], [22,9]]
+
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = [[False]*28 for _ in range(28)]
         # mask from right_rim to left_rim
@@ -107,12 +110,13 @@ class AlgoStrategy(gamelib.AlgoCore):
         if state.turn_number >= 5:
             self.resort = True
         
-        # --- Interceptors defense ---
-        if state.turn_number <= 2 or (self.resort and (not self.wall_integrity_check(state))):
-            _ = self._interceptors_defense(state)
+        # # --- Interceptors defense ---
+        # if state.turn_number <= 2 or (self.resort and (not self.wall_integrity_check(state))):
+        #     _ = self._interceptors_defense(state)
 
         # --- Offense ---
         if state.turn_number == 0:
+            self._build_far_side_walls(state, upd=False)
             self._initial_defense(state)
         elif not self.resort:
             attack, loc, num = self.should_attack(state)
@@ -128,20 +132,20 @@ class AlgoStrategy(gamelib.AlgoCore):
             mp = state.get_resource(MP)
 
             # 2) If we can afford the wave, open up the left gap
-            if mp >= threshold:
-                # remove walls at [0,13],[1,13] and build everywhere else
-                self._build_far_side_walls(state, exclude_side='l')
-            else:
-                # otherwise, keep full ring
-                self._build_far_side_walls(state)
+            if self.wall_integrity_check(state):
+                if mp >= threshold:
+                    # remove walls at [0,13],[1,13] and build everywhere else
+                    self._build_far_side_walls(state, exclude_side='l')
+                else:
+                    # otherwise, keep full ring
+                    self._build_far_side_walls(state)
 
-            # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
-            if (mp >= threshold
-                and not state.contains_stationary_unit([0,13])
-                and not state.contains_stationary_unit([1,13])
-                and self.wall_integrity_check(state)):
-                self._manage_support(state, [14, 0]) # place supporter
-                self.resort_offense(state)
+                # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
+                if (mp >= threshold
+                    and not state.contains_stationary_unit([0,13])
+                    and not state.contains_stationary_unit([1,13])):
+                    self._manage_support(state, [14, 0]) # place supporter
+                    self.resort_offense(state)
         else:
             # Normal far‑side walls when not in last resort
             self._build_far_side_walls(state, exclude_side=None)
@@ -277,6 +281,26 @@ class AlgoStrategy(gamelib.AlgoCore):
                 if unit and unit.unit_type == WALL and not unit.upgraded:
                     state.attempt_upgrade(loc)
                     return True
+        
+        # —————————————————————————————————————————————————————————————
+        # 1 bp) LAST‑RESORT MODE: rebuild the special wall ring (self.wallresnd_bp)
+        # —————————————————————————————————————————————————————————————
+        if self.resort and turn >= 5:
+            # 1) Spawn any missing walls
+            for loc in self.wallresnd_bp:
+                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
+                    state.attempt_spawn(WALL, loc)
+                    return True
+
+            # 2) Repair & rebuild badly damaged walls (<25% health)
+            for loc in self.wallresnd_bp:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
+                    state.attempt_remove(loc)
+                    if state.can_spawn(WALL, loc):
+                        state.attempt_spawn(WALL, loc)
+                        state.attempt_upgrade(loc)
+                    return True
 
         # —————————————————————————————————————————————————————————————
         # 2) INITIAL LINE: fix any broken wall+turret at start_points
@@ -331,12 +355,15 @@ class AlgoStrategy(gamelib.AlgoCore):
     
     def wall_integrity_check(self, state: GameState) -> bool:
         """
-        Check if the wall is intact (not breached) and return True if it is.
+        Return True if every location in self.wallresnd has an intact WALL unit.
         """
         for loc in self.wallresnd:
+            # retrieve the stationary unit (not just a boolean)
             unit = state.contains_stationary_unit(loc)
-            if unit and unit.unit_type == WALL:
+            # if there's no unit here, or it's not a WALL, integrity is broken
+            if getattr(unit, 'unit_type', None) != WALL:
                 return False
+
         return True
 
     def try_build_upgraded_turret(self, state: GameState, seq):
@@ -420,7 +447,8 @@ class AlgoStrategy(gamelib.AlgoCore):
     def _build_far_side_walls(
         self,
         state: GameState,
-        exclude_side: str = None
+        exclude_side: str = None,
+        upd: bool = True
     ) -> None:
         """
         Maintain walls along the far edges, optionally leaving an opening.
@@ -454,9 +482,10 @@ class AlgoStrategy(gamelib.AlgoCore):
         for loc in spots:
             if state.can_spawn(WALL, loc):
                 state.attempt_spawn(WALL, loc)
-            unit = state.contains_stationary_unit(loc)
-            if unit and unit.unit_type == WALL and not unit.upgraded:
-                state.attempt_upgrade(loc)
+            if upd:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and not unit.upgraded:
+                    state.attempt_upgrade(loc)
 
     # ------------------------
     # Offense logic
