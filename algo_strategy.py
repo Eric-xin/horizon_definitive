@@ -40,6 +40,9 @@ class AlgoStrategy(gamelib.AlgoCore):
         # walls for RESORT SECOND
         self.wallresnd = []
 
+        # build a 28×28 boolean mask for valid support positions
+        self.support_mask = []
+
     # ------------------------
     # Lifecycle hooks
     # ------------------------
@@ -74,11 +77,22 @@ class AlgoStrategy(gamelib.AlgoCore):
         self.start_points = [[3,12], [4,12], [5,11], [6,10], [9,10], [12,10], [15,10], [18,10], [21,10], [23,11], [24,12]]
 
         # rim
-        self.left_rim = [[13 + i, i + 1] for i in range(13)] + [[25, 14]]
-        self.rit_rim = [[27 - (13 + i), i + 1] for i in range(13)] + [[2, 14]]
+        self.left_rim = [[13 - i, i] for i in range(14)]
+        self.rit_rim = [[27 - (13 - i), i] for i in range(14)]
 
         # walls for RESORT SECOND
         self.wallresnd = [[3,13], [4,13], [5,12], [6,11], [7,11], [8,11], [9,11], [10,11], [11,11], [12,11], [13,11], [14,11], [15,11], [16,11], [17,11], [18,11], [19,11], [20,11], [21,11], [22,11], [23,12], [24,13]]
+
+        # build a 28×28 boolean mask for valid support positions
+        self.support_mask = [[False]*28 for _ in range(28)]
+        # mask from right_rim to left_rim
+        for (lx, ly), (rx, ry) in zip(self.left_rim, self.rit_rim):
+            y = ly  # same as ry
+            x_min = min(lx, rx) + 2
+            x_max = max(lx, rx) + 2
+            if x_min > x_max:
+                for x in range(x_min, x_max + 1):
+                    self.support_mask[x][y] = True
 
     def on_turn(self, turn_state):
         """Main turn entry: offense, defense, support."""
@@ -90,8 +104,12 @@ class AlgoStrategy(gamelib.AlgoCore):
         self.last_turn = state.turn_number
 
         # --- Check for last resort ---
-        if state.turn_number >= 6:
+        if state.turn_number >= 5:
             self.resort = True
+        
+        # --- Interceptors defense ---
+        if state.turn_number <= 2 or (self.resort and (not self.wall_integrity_check(state))):
+            _ = self._interceptors_defense(state)
 
         # --- Offense ---
         if state.turn_number == 0:
@@ -120,12 +138,13 @@ class AlgoStrategy(gamelib.AlgoCore):
             # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
             if (mp >= threshold
                 and not state.contains_stationary_unit([0,13])
-                and not state.contains_stationary_unit([1,13])):
+                and not state.contains_stationary_unit([1,13])
+                and self.wall_integrity_check(state)):
                 self._manage_support(state, [14, 0]) # place supporter
                 self.resort_offense(state)
         else:
             # Normal far‑side walls when not in last resort
-            self._build_far_side_walls(state)
+            self._build_far_side_walls(state, exclude_side=None)
 
         # --- Defense improvements ---
         max_improvements = 15
@@ -162,11 +181,11 @@ class AlgoStrategy(gamelib.AlgoCore):
         # state.attempt_upgrade(self.start_points) # No upgrade of turrets based on the current rule
         walls = [[x, y + 1] for x, y in self.start_points]
         state.attempt_spawn(WALL, walls)
-        # try to upgrade walls
-        for loc in walls:
-            unit = state.contains_stationary_unit(loc)
-            if unit and unit.unit_type == WALL and not unit.upgraded:
-                state.attempt_upgrade(loc)
+        # # try to upgrade walls
+        # for loc in walls:
+        #     unit = state.contains_stationary_unit(loc)
+        #     if unit and unit.unit_type == WALL and not unit.upgraded:
+        #         state.attempt_upgrade(loc)
 
     # ------------------------
     # Defense improvement
@@ -236,28 +255,28 @@ class AlgoStrategy(gamelib.AlgoCore):
         # 1) LAST‑RESORT MODE: rebuild your special wall ring (self.wallresnd)
         # —————————————————————————————————————————————————————————————
         if self.resort:
-            # find all current walls in wallresnd
-            existing = {
-                tuple(loc)
-                for loc in self.wallresnd
-                if (u := state.contains_stationary_unit(loc)) 
-                and u.unit_type == WALL
-            }
+            # 1) Spawn any missing walls
+            for loc in self.wallresnd:
+                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
+                    state.attempt_spawn(WALL, loc)
+                    return True
+
+            # 2) Repair & rebuild badly damaged walls (<25% health)
             for loc in self.wallresnd:
                 unit = state.contains_stationary_unit(loc)
-                # if damaged below 25%, scrap + rebuild
                 if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
                     state.attempt_remove(loc)
                     if state.can_spawn(WALL, loc):
                         state.attempt_spawn(WALL, loc)
                         state.attempt_upgrade(loc)
                     return True
-                # if missing, spawn + upgrade
-                if tuple(loc) not in existing and state.can_spawn(WALL, loc):
-                    state.attempt_spawn(WALL, loc)
+
+            # 3) Upgrade any walls that aren’t yet upgraded
+            for loc in self.wallresnd:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and not unit.upgraded:
                     state.attempt_upgrade(loc)
                     return True
-            return False
 
         # —————————————————————————————————————————————————————————————
         # 2) INITIAL LINE: fix any broken wall+turret at start_points
@@ -309,6 +328,16 @@ class AlgoStrategy(gamelib.AlgoCore):
 
         # nothing to do
         return False
+    
+    def wall_integrity_check(self, state: GameState) -> bool:
+        """
+        Check if the wall is intact (not breached) and return True if it is.
+        """
+        for loc in self.wallresnd:
+            unit = state.contains_stationary_unit(loc)
+            if unit and unit.unit_type == WALL:
+                return False
+        return True
 
     def try_build_upgraded_turret(self, state: GameState, seq):
         if state.get_resource(MP) < 8:
@@ -343,47 +372,45 @@ class AlgoStrategy(gamelib.AlgoCore):
             if not state.contains_stationary_unit(pos):
                 return state.attempt_spawn(WALL, pos)
         return False
+    
+    # ------------------------
+    # Interoceptors defense
+    # ------------------------
+    def _interceptors_defense(self, state: GameState):
+        # send interceptors at [5,8] and [22,8]
+        interoceptor_cost = state.type_cost(INTERCEPTOR)[1]
+        if state.get_resource(MP) >= interoceptor_cost * 2:
+            if state.can_spawn(INTERCEPTOR, [5, 8]):
+                state.attempt_spawn(INTERCEPTOR, [5, 8])
+            if state.can_spawn(INTERCEPTOR, [22, 8]):
+                state.attempt_spawn(INTERCEPTOR, [22, 8])
+            return True
+        return False
 
     # ------------------------
     # Support management
     # ------------------------
     def _manage_support(self, state: GameState, scout_loc):
         t = state.turn_number
-        # 1) build only the inward‑from‑diagonal band
-        desired = {
-            (x+2, y) for x, y in self.left_rim
-        } | {
-            (x-2, y) for x, y in self.rit_rim
-        }
-
         if scout_loc and t >= 5:
             path = state.find_path_to_edge(scout_loc)
-            rng  = self.config["unitInformation"][1]["shieldRange"]
-
-            # prune anything outside desired or out of range
+            rng = self.config["unitInformation"][1]["shieldRange"]
+            # prune
             kept = []
             for loc in self.support_locations:
-                if ( tuple(loc) in desired
-                    and any(self.manhattan(loc, p) <= rng for p in path)
-                ):
+                unit = state.contains_stationary_unit(loc)
+                if unit and any(self.manhattan(loc, p) <= rng for p in path):
                     kept.append(loc)
                 else:
                     state.attempt_remove(loc)
             self.support_locations = kept
-
-            # place new only where desired ∩ path‑range
+            # place new
             for loc in state.game_map.get_locations_in_range(scout_loc, rng):
-                pt = tuple(loc)
-                if ( pt in desired
-                    and pt not in path
-                    and pt not in kept
-                    and state.can_spawn(SUPPORT, loc)
-                ):
-                    state.attempt_spawn(SUPPORT, loc)
-                    state.attempt_upgrade(loc)
-                    self.support_locations.append(loc)
-
-        # upgrade all valid shields
+                if loc not in kept and loc not in path and state.can_spawn(SUPPORT, loc):
+                    if state.attempt_spawn(SUPPORT, loc):
+                        self.support_locations.append(loc)
+                        state.attempt_upgrade(loc)
+        # upgrade all shields
         for loc in list(self.support_locations):
             state.attempt_upgrade(loc)
 
