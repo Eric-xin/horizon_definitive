@@ -123,6 +123,14 @@ class AlgoStrategy(gamelib.AlgoCore):
             if attack:
                 self.scout_attack(state, loc, num)
         
+        # --- Defense improvements ---
+        max_improvements = 15
+        for _ in range(max_improvements):
+            if state.get_resource(SP) < 2:
+                break
+            if not self._try_improve_defense(state):
+                break
+        
         # --- Far-side walls | RESORT SECOND ---
         if self.resort:
             # 1) Compute MP threshold for 3 interceptors + 7 scouts
@@ -132,31 +140,22 @@ class AlgoStrategy(gamelib.AlgoCore):
             mp = state.get_resource(MP)
 
             # 2) If we can afford the wave, open up the left gap
-            if self.wall_integrity_check(state):
-                if mp >= threshold:
-                    # remove walls at [0,13],[1,13] and build everywhere else
-                    self._build_far_side_walls(state, exclude_side='l')
-                else:
-                    # otherwise, keep full ring
-                    self._build_far_side_walls(state)
+            if mp >= threshold:
+                # remove walls at [0,13],[1,13] and build everywhere else
+                self._build_far_side_walls(state, exclude_side='l')
+            else:
+                # otherwise, keep full ring
+                self._build_far_side_walls(state)
 
-                # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
-                if (mp >= threshold
-                    and not state.contains_stationary_unit([0,13])
-                    and not state.contains_stationary_unit([1,13])):
-                    self._manage_support(state, [14, 0]) # place supporter
-                    self.resort_offense(state)
+            # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
+            if (mp >= threshold
+                and not state.contains_stationary_unit([0,13])
+                and not state.contains_stationary_unit([1,13])):
+                self._manage_support(state, [14, 0]) # place supporter
+                self.resort_offense(state)
         else:
             # Normal far‑side walls when not in last resort
             self._build_far_side_walls(state, exclude_side=None)
-
-        # --- Defense improvements ---
-        max_improvements = 15
-        for _ in range(max_improvements):
-            if state.get_resource(SP) < 2:
-                break
-            if not self._try_improve_defense(state):
-                break
 
         # --- Support management ---
         self._manage_support(state, loc if 'loc' in locals() else None)
@@ -352,19 +351,6 @@ class AlgoStrategy(gamelib.AlgoCore):
 
         # nothing to do
         return False
-    
-    def wall_integrity_check(self, state: GameState) -> bool:
-        """
-        Return True if every location in self.wallresnd has an intact WALL unit.
-        """
-        for loc in self.wallresnd:
-            # retrieve the stationary unit (not just a boolean)
-            unit = state.contains_stationary_unit(loc)
-            # if there's no unit here, or it's not a WALL, integrity is broken
-            if getattr(unit, 'unit_type', None) != WALL:
-                return False
-
-        return True
 
     def try_build_upgraded_turret(self, state: GameState, seq):
         if state.get_resource(MP) < 8:
