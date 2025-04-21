@@ -43,6 +43,9 @@ class AlgoStrategy(gamelib.AlgoCore):
         self.wallresnd_bp_l = []
         self.wallresnd_bp_r = []
 
+        # walls for resort third
+        self.wallresrd = []
+
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = []
 
@@ -98,6 +101,9 @@ class AlgoStrategy(gamelib.AlgoCore):
             [26,12], [25,12], [25,11], [24,11],
             [24,10], [23,10], [23,9],  [22,9]
         ]
+
+        # walls for resort third
+        self.wallresrd = [[6,9], [7,9], [8,9], [9,9], [10,9], [11,9], [12,9], [13,9], [14,9], [15,9], [16,9], [17,9], [18,9], [19,9], [20,9], [21,9]]
 
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = [[False]*28 for _ in range(28)]
@@ -362,6 +368,44 @@ class AlgoStrategy(gamelib.AlgoCore):
                         state.attempt_spawn(WALL, loc)
                         # state.attempt_upgrade(loc)
                     return True
+
+        # —————————————————————————————————————————————————————————————
+        # 2) INITIAL LINE: fix any broken wall+turret at start_points
+        # —————————————————————————————————————————————————————————————
+        for pt in self.start_points:
+            wall_loc   = [pt[0], pt[1] + 1]
+            turret_loc = pt
+
+            # rebuild missing wall first
+            if not state.contains_stationary_unit(wall_loc) and state.can_spawn(WALL, wall_loc):
+                state.attempt_spawn(WALL, wall_loc)
+                state.attempt_upgrade(wall_loc)
+                return True
+
+            # then rebuild missing turret
+            if not state.contains_stationary_unit(turret_loc) and state.can_spawn(TURRET, turret_loc):
+                state.attempt_spawn(TURRET, turret_loc)
+                return True
+        
+        # —————————————————————————————————————————————————————————————
+        # third layer of defense
+        # —————————————————————————————————————————————————————————————
+        if self.resort and turn >= 5:
+            # 1) Spawn any missing walls
+            for loc in self.wallresrd:
+                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
+                    state.attempt_spawn(WALL, loc)
+                    return True
+
+            # 2) Repair & rebuild badly damaged walls (<25% health)
+            for loc in self.wallresrd:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
+                    state.attempt_remove(loc)
+                    if state.can_spawn(WALL, loc):
+                        state.attempt_spawn(WALL, loc)
+                        # state.attempt_upgrade(loc)
+                    return True
         
         # —————————————————————————————————————————————————————————————
         # wall up
@@ -381,24 +425,13 @@ class AlgoStrategy(gamelib.AlgoCore):
                 if unit and unit.unit_type == WALL and not unit.upgraded:
                     state.attempt_upgrade(loc)
                     return True
-
-        # —————————————————————————————————————————————————————————————
-        # 2) INITIAL LINE: fix any broken wall+turret at start_points
-        # —————————————————————————————————————————————————————————————
-        for pt in self.start_points:
-            wall_loc   = [pt[0], pt[1] + 1]
-            turret_loc = pt
-
-            # rebuild missing wall first
-            if not state.contains_stationary_unit(wall_loc) and state.can_spawn(WALL, wall_loc):
-                state.attempt_spawn(WALL, wall_loc)
-                state.attempt_upgrade(wall_loc)
-                return True
-
-            # then rebuild missing turret
-            if not state.contains_stationary_unit(turret_loc) and state.can_spawn(TURRET, turret_loc):
-                state.attempt_spawn(TURRET, turret_loc)
-                return True
+        
+        for loc in self.start_points:
+                wall_loc   = [loc[0], loc[1] + 1]
+                unit = state.contains_stationary_unit(wall_loc)
+                if unit and unit.unit_type == WALL and not unit.upgraded:
+                    state.attempt_upgrade(wall_loc)
+                    return True
 
         # —————————————————————————————————————————————————————————————
         # 3) SYMMETRIC MID‑DEFENSE: walls at y=11, turrets at y=10
