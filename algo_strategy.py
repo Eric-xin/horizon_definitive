@@ -40,9 +40,14 @@ class AlgoStrategy(gamelib.AlgoCore):
         # walls for RESORT SECOND
         self.wallresnd = []
         self.wallresnd_bp = []
+        self.wallresnd_bp_l = []
+        self.wallresnd_bp_r = []
 
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = []
+
+        # resort side
+        self.resort_side = None
 
     # ------------------------
     # Lifecycle hooks
@@ -84,7 +89,15 @@ class AlgoStrategy(gamelib.AlgoCore):
         # walls for RESORT SECOND
         self.wallresnd = [[3,13], [4,13], [5,12], [6,11], [7,11], [8,11], [9,11], [10,11], [11,11], [12,11], [13,11], [14,11], [15,11], [16,11], [17,11], [18,11], [19,11], [20,11], [21,11], [22,11], [23,12], [24,13]]
 
-        self.wallresnd_bp = [[26,12], [25,12], [25,11], [24,11], [24,10], [23,10], [23,9], [22,9]]
+        # self.wallresnd_bp = [[26,12], [25,12], [25,11], [24,11], [24,10], [23,10], [23,9], [22,9]]
+        self.wallresnd_bp_l = [
+            [1,12], [2,12], [2,11], [3,11],
+            [3,10], [4,10], [4,9],  [5,9]
+        ]
+        self.wallresnd_bp_r = [
+            [26,12], [25,12], [25,11], [24,11],
+            [24,10], [23,10], [23,9],  [22,9]
+        ]
 
         # build a 28×28 boolean mask for valid support positions
         self.support_mask = [[False]*28 for _ in range(28)]
@@ -133,26 +146,47 @@ class AlgoStrategy(gamelib.AlgoCore):
         
         # --- Far-side walls | RESORT SECOND ---
         if self.resort:
+            # If side is not set, choose the side with less enemy defense
+            if self.resort_side is None:
+                self.resort_side = self.evaluate_enemy_defense(state)
+                self.wallresnd_bp = self.wallresnd_bp_r if self.resort_side == 'l' else self.wallresnd_bp_l
+                gamelib.debug_write(f"Resort side: {self.resort_side}")
+            
             # 1) Compute MP threshold for 3 interceptors + 7 scouts
             _, int_cost   = state.type_cost(INTERCEPTOR)  # returns [sp, mp]
             _, scout_cost = state.type_cost(SCOUT)
             threshold = 3 * int_cost + 7 * scout_cost
             mp = state.get_resource(MP)
 
-            # 2) If we can afford the wave, open up the left gap
-            if mp >= threshold:
-                # remove walls at [0,13],[1,13] and build everywhere else
-                self._build_far_side_walls(state, exclude_side='l')
-            else:
-                # otherwise, keep full ring
-                self._build_far_side_walls(state)
+            # 2) If we can afford the wave
+            if self.resort_side == 'l':
+                if mp >= threshold:
+                    # remove walls at [0,13],[1,13] and build everywhere else
+                    self._build_far_side_walls(state, exclude_side='l')
+                else:
+                    # otherwise, keep full ring
+                    self._build_far_side_walls(state)
 
-            # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
-            if (mp >= threshold
-                and not state.contains_stationary_unit([0,13])
-                and not state.contains_stationary_unit([1,13])):
-                self._manage_support(state, [14, 0]) # place supporter
-                self.resort_offense(state)
+                # 3) If we’ve got the MP *and* the left‑gap is clear, launch offense
+                if (mp >= threshold
+                    and not state.contains_stationary_unit([0,13])
+                    and not state.contains_stationary_unit([1,13])):
+                    self._manage_support(state, [14, 0]) # place supporter
+                    self.resort_offense(state, 'l')
+            elif self.resort_side == 'r':
+                if mp >= threshold:
+                    # remove walls at [26,13],[27,13] and build everywhere else
+                    self._build_far_side_walls(state, exclude_side='r')
+                else:
+                    # otherwise, keep full ring
+                    self._build_far_side_walls(state)
+
+                # 3) If we’ve got the MP *and* the right‑gap is clear, launch offense
+                if (mp >= threshold
+                    and not state.contains_stationary_unit([26,13])
+                    and not state.contains_stationary_unit([27,13])):
+                    self._manage_support(state, [13, 0])
+                    self.resort_offense(state, 'r')
         else:
             # Normal far‑side walls when not in last resort
             self._build_far_side_walls(state, exclude_side=None)
@@ -237,6 +271,41 @@ class AlgoStrategy(gamelib.AlgoCore):
             if val < best_v:
                 best_v, best_i = val, i
         return best_i
+    
+    def evaluate_enemy_defense(self, state: GameState) -> str:
+        """
+        Scan all stationary enemy WALLs and TURRETs (upgraded or not) on the opponent's side (y >= 14),
+        sum a weighted health total on left (x < 14) vs. right (x >= 14),
+        and return the side with less weighted defense.
+        """
+        # Tuning: weight per point of health for each unit type
+        WEIGHTS = {
+            (WALL,   False): 1.0,  # basic wall
+            (WALL,   True):  1.5,  # upgraded wall
+            (TURRET, False): 2.0,  # basic turret
+            (TURRET, True):  3.0   # upgraded turret
+        }
+        totals = {'l': 0.0, 'r': 0.0}
+
+        for x in range(28):
+            for y in range(14, 28):
+                loc = [x, y]
+                cell = state.game_map[loc] or []    # treat None as empty
+                for unit in cell:
+                    # skip your own units
+                    if unit.player_index == 0:
+                        continue
+                    weight = WEIGHTS.get((unit.unit_type, unit.upgraded))
+                    if weight is None:
+                        continue
+                    side = 'l' if x < 14 else 'r'
+                    totals[side] += weight
+
+        gamelib.debug_write(
+            f"Enemy defense weighted L={totals['l']:.1f}, R={totals['r']:.1f}"
+        )
+        # open the weaker side
+        return 'l' if totals['l'] < totals['r'] else 'r'
 
     def improve_defense(self, state: GameState, sector: int, defense) -> bool:
         """
@@ -488,35 +557,44 @@ class AlgoStrategy(gamelib.AlgoCore):
     # ------------------------
     # Offense logic
     # ------------------------
-    def resort_offense(self, state: GameState) -> None:
+    def resort_offense(self, state: GameState, side: str) -> None:
         """
-        Last‑resort offense: spawn up to 3 INTERCEPTORs at [3,10],
-        then deploy as many SCOUTs as possible at [14,0] with remaining MP.
+        Last‑resort offense:
+        - spawn up to 3 INTERCEPTORs at the side‑dependent rim (left or right),
+        - then deploy as many SCOUTs as possible at the bottom edge on that same side.
         """
+        # choose your spawn points based on the weaker side
+        if side == 'l':
+            int_loc   = [3, 10]   # left interceptor rim
+            scout_loc = [14, 0]    # just inside left bottom edge
+        else:  # 'r'
+            int_loc   = [24, 10]  # right interceptor rim
+            scout_loc = [13, 0]   # just inside right bottom edge
+
         # 1) Get available MP
         mp_available = state.get_resource(MP)
 
-        # 2) Determine MP costs (cast to int)
+        # 2) Determine MP costs
         _, mp_cost_int   = state.type_cost(INTERCEPTOR)
         _, mp_cost_scout = state.type_cost(SCOUT)
         mp_cost_int   = int(mp_cost_int)
         mp_cost_scout = int(mp_cost_scout)
 
-        # 3) Spawn up to 3 interceptors at [3,10]
+        # 3) Spawn up to 3 interceptors at the side rim
         max_int = mp_available // mp_cost_int
-        num_int = min(3, max_int)
-        num_int = int(num_int)  # ensure it's an integer
-        if num_int > 0 and state.can_spawn(INTERCEPTOR, [3, 10]):
-            state.attempt_spawn(INTERCEPTOR, [3, 10], num_int)
+        num_int = int(min(3, max_int))
+        if num_int > 0 and state.can_spawn(INTERCEPTOR, int_loc):
+            state.attempt_spawn(INTERCEPTOR, int_loc, num_int)
             mp_available -= num_int * mp_cost_int
-            gamelib.debug_write(f"Resort offense: spawned {num_int} INTERCEPTOR(s) at [3,10]")
+            gamelib.debug_write(
+                f"Resort offense: spawned {num_int} INTERCEPTOR(s) at {int_loc}")
 
-        # 4) Spend all remaining MP on scouts at [14,0]
-        num_scout = mp_available // mp_cost_scout
-        num_scout = int(num_scout)
-        if num_scout > 0 and state.can_spawn(SCOUT, [14, 0]):
-            state.attempt_spawn(SCOUT, [14, 0], num_scout)
-            gamelib.debug_write(f"Resort offense: spawned {num_scout} SCOUT(s) at [14,0]")
+        # 4) Spend all remaining MP on scouts at that bottom‑edge point
+        num_scout = int(mp_available // mp_cost_scout)
+        if num_scout > 0 and state.can_spawn(SCOUT, scout_loc):
+            state.attempt_spawn(SCOUT, scout_loc, num_scout)
+            gamelib.debug_write(
+                f"Resort offense: spawned {num_scout} SCOUT(s) at {scout_loc}")
 
     def should_attack(self, state: GameState):
         mp = state.get_resource(MP)
