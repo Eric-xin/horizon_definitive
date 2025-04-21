@@ -273,13 +273,6 @@ class AlgoStrategy(gamelib.AlgoCore):
                         state.attempt_spawn(WALL, loc)
                         state.attempt_upgrade(loc)
                     return True
-
-            # 3) Upgrade any walls that aren’t yet upgraded
-            for loc in self.wallresnd:
-                unit = state.contains_stationary_unit(loc)
-                if unit and unit.unit_type == WALL and not unit.upgraded:
-                    state.attempt_upgrade(loc)
-                    return True
         
         # —————————————————————————————————————————————————————————————
         # 1 bp) LAST‑RESORT MODE: rebuild the special wall ring (self.wallresnd_bp)
@@ -298,7 +291,26 @@ class AlgoStrategy(gamelib.AlgoCore):
                     state.attempt_remove(loc)
                     if state.can_spawn(WALL, loc):
                         state.attempt_spawn(WALL, loc)
-                        state.attempt_upgrade(loc)
+                        # state.attempt_upgrade(loc)
+                    return True
+        
+        # —————————————————————————————————————————————————————————————
+        # wall up
+        # —————————————————————————————————————————————————————————————
+        if self.resort:
+            # 3) Upgrade any walls that aren’t yet upgraded
+            for loc in self.wallresnd:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and not unit.upgraded:
+                    state.attempt_upgrade(loc)
+                    return True
+        
+        if self.resort and turn >= 5:
+            # 3) Upgrade any walls that aren’t yet upgraded
+            for loc in self.wallresnd_bp:
+                unit = state.contains_stationary_unit(loc)
+                if unit and unit.unit_type == WALL and not unit.upgraded:
+                    state.attempt_upgrade(loc)
                     return True
 
         # —————————————————————————————————————————————————————————————
