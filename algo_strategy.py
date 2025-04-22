@@ -315,156 +315,89 @@ class AlgoStrategy(gamelib.AlgoCore):
 
     def improve_defense(self, state: GameState, sector: int, defense) -> bool:
         """
-        Improve defenses in one sector or, if in last‑resort mode, rebuild a special wall ring.
-        
-        Parameters:
-        state   – current GameState
-        sector  – index 0–3 of your four triangular sectors
-        defense – output of parse_defenses(state)[sector] (unused here)
-        
-        Returns:
-        True if an action (spawn/upgrade/remove) was performed this turn.
+        Improve defenses in one sector or, if in last-resort mode, rebuild rings,
+        fix the initial line, upgrade walls, and place symmetric mid defenses.
+        Returns True if an action was performed this turn.
         """
-        turn   = state.turn_number
-        start  = self.start_points[sector]
-        centre = 14
+        turn = state.turn_number
+        starts = self.start_points
 
-        # —————————————————————————————————————————————————————————————
-        # 1) LAST‑RESORT MODE: rebuild your special wall ring (self.wallresnd)
-        # —————————————————————————————————————————————————————————————
+        # 1) LAST-RESORT MODE: spawn & repair rings
+        rings = []
         if self.resort:
-            # 1) Spawn any missing walls
-            for loc in self.wallresnd:
-                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
-                    state.attempt_spawn(WALL, loc)
-                    return True
-
-            # 2) Repair & rebuild badly damaged walls (<25% health)
-            for loc in self.wallresnd:
-                unit = state.contains_stationary_unit(loc)
-                if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
-                    state.attempt_remove(loc)
-                    if state.can_spawn(WALL, loc):
-                        state.attempt_spawn(WALL, loc)
-                        state.attempt_upgrade(loc)
-                    return True
-        
-        # —————————————————————————————————————————————————————————————
-        # 1 bp) LAST‑RESORT MODE: rebuild the special wall ring (self.wallresnd_bp)
-        # —————————————————————————————————————————————————————————————
+            rings.append(self.wallresnd)
         if self.resort and turn >= 5:
-            # 1) Spawn any missing walls
-            for loc in self.wallresnd_bp:
+            rings.append(self.wallresnd_bp)
+            rings.append(self.wallresrd)
+
+        for ring in rings:
+            # spawn missing walls
+            for loc in ring:
                 if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
                     state.attempt_spawn(WALL, loc)
                     return True
-
-            # 2) Repair & rebuild badly damaged walls (<25% health)
-            for loc in self.wallresnd_bp:
+            # repair damaged walls
+            for loc in ring:
                 unit = state.contains_stationary_unit(loc)
                 if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
                     state.attempt_remove(loc)
                     if state.can_spawn(WALL, loc):
                         state.attempt_spawn(WALL, loc)
-                        # state.attempt_upgrade(loc)
                     return True
 
-        # —————————————————————————————————————————————————————————————
-        # 2) INITIAL LINE: fix any broken wall+turret at start_points
-        # —————————————————————————————————————————————————————————————
-        for pt in self.start_points:
-            wall_loc   = [pt[0], pt[1] + 1]
-            turret_loc = pt
-
-            # rebuild missing wall first
-            if not state.contains_stationary_unit(wall_loc) and state.can_spawn(WALL, wall_loc):
-                state.attempt_spawn(WALL, wall_loc)
-                state.attempt_upgrade(wall_loc)
+        # 2) INITIAL LINE: walls then turrets
+        for x, y in starts:
+            wall = (x, y+1)
+            turret = (x, y)
+            if not state.contains_stationary_unit(wall) and state.can_spawn(WALL, wall):
+                state.attempt_spawn(WALL, wall)
+                return True
+            if not state.contains_stationary_unit(turret) and state.can_spawn(TURRET, turret):
+                state.attempt_spawn(TURRET, turret)
                 return True
 
-            # then rebuild missing turret
-            if not state.contains_stationary_unit(turret_loc) and state.can_spawn(TURRET, turret_loc):
-                state.attempt_spawn(TURRET, turret_loc)
-                return True
-        
-        # —————————————————————————————————————————————————————————————
-        # third layer of defense
-        # —————————————————————————————————————————————————————————————
-        if self.resort and turn >= 5:
-            # 1) Spawn any missing walls
-            for loc in self.wallresrd:
-                if not state.contains_stationary_unit(loc) and state.can_spawn(WALL, loc):
-                    state.attempt_spawn(WALL, loc)
-                    return True
-
-            # 2) Repair & rebuild badly damaged walls (<25% health)
-            for loc in self.wallresrd:
-                unit = state.contains_stationary_unit(loc)
-                if unit and unit.unit_type == WALL and unit.health < 0.25 * unit.max_health:
-                    state.attempt_remove(loc)
-                    if state.can_spawn(WALL, loc):
-                        state.attempt_spawn(WALL, loc)
-                        # state.attempt_upgrade(loc)
-                    return True
-        
-        # —————————————————————————————————————————————————————————————
-        # wall up
-        # —————————————————————————————————————————————————————————————
+        # 3) WALL-UP: upgrade walls in rings and initial line
+        upgrade_sets = []
         if self.resort:
-            # 3) Upgrade any walls that aren’t yet upgraded
-            for loc in self.wallresnd:
+            upgrade_sets.append(self.wallresnd)
+        if self.resort and turn >= 5:
+            upgrade_sets.append(self.wallresnd_bp)
+            upgrade_sets.append(self.wallresrd)
+        # initial line walls
+        upgrade_sets.append([(x, y+1) for x, y in starts])
+
+        for ring in upgrade_sets:
+            for loc in ring:
                 unit = state.contains_stationary_unit(loc)
                 if unit and unit.unit_type == WALL and not unit.upgraded:
                     state.attempt_upgrade(loc)
                     return True
-        
-        if self.resort and turn >= 5:
-            # 3) Upgrade any walls that aren’t yet upgraded
-            for loc in self.wallresnd_bp:
-                unit = state.contains_stationary_unit(loc)
-                if unit and unit.unit_type == WALL and not unit.upgraded:
-                    state.attempt_upgrade(loc)
-                    return True
-        
-        for loc in self.start_points:
-                wall_loc   = [loc[0], loc[1] + 1]
-                unit = state.contains_stationary_unit(wall_loc)
-                if unit and unit.unit_type == WALL and not unit.upgraded:
-                    state.attempt_upgrade(wall_loc)
-                    return True
 
-        # —————————————————————————————————————————————————————————————
-        # 3) SYMMETRIC MID‑DEFENSE: walls at y=11, turrets at y=10
-        #    Ranges: x=7…11 (left) and x=22…18 (right), interleaved
-        # —————————————————————————————————————————————————————————————
-        left_range  = range(7, 12)       #  7,8,9,10,11
-        right_range = range(22, 17, -1)  # 22,21,20,19,18
-
-        for lx, rx in zip(left_range, right_range):
+        # 4) SYMMETRIC MID-DEFENSE: walls at y=11, turrets at y=10
+        left_x = range(7, 12)
+        right_x = range(22, 17, -1)
+        for lx, rx in zip(left_x, right_x):
             for x in (lx, rx):
-                wloc = [x, 11]
-                tloc = [x, 10]
-                wall_unit   = state.contains_stationary_unit(wloc)
-                turret_unit = state.contains_stationary_unit(tloc)
-
-                # 3.1) spawn/upgrade missing wall
-                if not wall_unit and state.can_spawn(WALL, wloc):
-                    state.attempt_spawn(WALL, wloc)
-                    state.attempt_upgrade(wloc)
+                wall = (x, 11)
+                turret = (x, 10)
+                w = state.contains_stationary_unit(wall)
+                t = state.contains_stationary_unit(turret)
+                # spawn or upgrade wall
+                if not w and state.can_spawn(WALL, wall):
+                    state.attempt_spawn(WALL, wall)
+                    state.attempt_upgrade(wall)
                     return True
-
-                # 3.2) upgrade damaged/unupgraded wall
-                if wall_unit and wall_unit.unit_type == WALL and not wall_unit.upgraded:
-                    state.attempt_upgrade(wloc)
+                if w and w.unit_type == WALL and not w.upgraded:
+                    state.attempt_upgrade(wall)
                     return True
-
-                # 3.3) spawn missing turret behind
-                if not turret_unit and wall_unit and state.can_spawn(TURRET, tloc):
-                    state.attempt_spawn(TURRET, tloc)
+                # spawn turret
+                if not t and w and state.can_spawn(TURRET, turret):
+                    state.attempt_spawn(TURRET, turret)
                     return True
 
         # nothing to do
         return False
+
 
     def try_build_upgraded_turret(self, state: GameState, seq):
         if state.get_resource(MP) < 8:
