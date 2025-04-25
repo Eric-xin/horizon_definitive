@@ -2,6 +2,9 @@
 
 This is the Horizon Definitive Algorithm for Citadel C1 Terminal.
 
+The original Horizon code is `horizon_definitive.py`. Other variations are made for Europe Terminal spring 2025.
+
+The new strategy `rim definitive` is a new approach to the Europe Terminal, specifically targeting the `rim` region. More details will be provided in the future.
 
 ## Features
 
@@ -74,3 +77,8 @@ Please keep new code modular and document any new methods with concise docstring
 ## License
 
 This project is licensed under the MIT License. Feel free to use, modify, and distribute!
+
+Please note that some parts of the code may be subject to the Citadel C1 Terminal SDK license. Ensure compliance with all relevant licenses when using this code.
+
+## Acknowledgments
+- Thanks to the Citadel C1 Terminal community for their support and feedback.
